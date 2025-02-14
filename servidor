@@ -4,25 +4,172 @@ from tcp import Servidor
 import re
 
 
+# Dicionario que guarda os nicks bem como sua tupla de conexao para identificar o usuario
+nicknames = {
+    # conexao: nickname
+}
+
+channels = {
+    # name_channel: list(conexao)
+}
+
+residuos = b''
+
+
+def validar_comando(conexao, dados):
+    dados = dados.rstrip(b'\r\n')
+    comando = dados.split(b' ', 1)[0] # Separando o comando do restante da mensagem
+    dados = dados.split(b' ', 1)[1]
+
+    if (comando == b'PING'):
+        conexao.enviar(b':server PONG server :' + dados + b'\r\n')
+
+    elif (comando == b'NICK'):
+        validar_nick(conexao, dados)
+
+    elif (comando == b'PRIVMSG'):
+        send_msg(conexao, dados)
+    
+    elif (comando == b'JOIN'):
+        join_channel(conexao, dados)
+
+    elif (comando == b'PART'):
+        leave_channel(conexao, dados)
+
+    return
+
+def validar_nick(conexao, nick_novo):
+    nick_atual = nicknames[conexao]
+
+    if not(validar_nome(nick_novo)): # validar se o nome nao tem nenhum incogruência
+        conexao.enviar(b':server 432 ' + nick_atual + b' ' + nick_novo + b' :Erroneous nickname\r\n')
+        return
+    
+    if nick_novo.lower() in (value.lower() for value in nicknames.values()): # verificando se algum usuário ja esta usando o nome
+        conexao.enviar(b':server 433 ' + nicknames[conexao] + b' ' + nick_novo + b' :Nickname is already in use\r\n')   
+        return
+
+    if(nicknames[conexao] != b'*'): # Verifica se o Usuario ja tem nome e deleta o nome antigo caso tenha
+        conexao.enviar(b':' + nicknames[conexao] + b' NICK ' + nick_novo + b'\r\n')
+        nicknames[conexao] = nick_novo
+        return
+   
+    # colocando o novo apelido do usuario no dicionario e na sua classe conexao
+    nicknames[conexao] = nick_novo
+    conexao.enviar(b':server 001 ' + nick_novo + b' :Welcome\r\n')
+    conexao.enviar(b':server 422 ' + nick_novo + b' :MOTD File is missing\r\n')
+
+    return
+
+def leave_channel(conexao, nick_channel):
+    nick_channel = nick_channel.split(b' ', 1)[0]
+
+    for conexao_recever in channels[nick_channel][:]:
+        conexao_recever.enviar(b':' + nicknames[conexao] + b' PART ' + nick_channel + b'\r\n')
+
+    channels[nick_channel].remove(conexao)
+
+    return
+    
+def join_channel(conexao, dados):
+    nick_channel = dados
+    real_name_channel = nick_channel
+
+    if nick_channel.startswith(b'#'):
+        
+        if not(validar_nome(nick_channel[1:])):
+            conexao.enviar(b':server 403 canal :No such channel\r\n')
+            return
+        
+    if not(nick_channel.lower() in (value.lower() for value in channels)):
+        channels[nick_channel] = [conexao]
+    else: 
+        for chan in channels:
+            if chan.lower() == nick_channel.lower():
+                real_name_channel = chan
+                channels[chan].append(conexao)
+                channels[chan] = sorted(channels[chan], key=lambda conexao: nicknames[conexao].lower())
+
+    for conexao_recever in channels[real_name_channel]:
+        str = b':' + nicknames[conexao] + b' JOIN :' + nick_channel + b'\r\n'
+        conexao_recever.enviar(str)
+
+    str = b':server 353 ' + nicknames[conexao] + b' = ' + nick_channel + b' :'
+    for conexao_participantes_canal in channels[real_name_channel]:
+        if(len(str) + len(nicknames[conexao_participantes_canal]) < 510):
+            str += nicknames[conexao_participantes_canal] + b' '
+        else:
+            conexao.enviar(str + b'\r\n')
+            str = nicknames[conexao_participantes_canal] + b' '
+    conexao.enviar(str + b'\r\n')
+    conexao.enviar(b':server 366 ' + nicknames[conexao] + b' ' + nick_channel + b' :End of /NAMES list.\r\n')
+    
+
+def send_msg(conexao, dados): 
+    nick_recever = dados.split(b' :', 1)[0]
+    nick_sender = nicknames[conexao]
+
+    if nick_recever.startswith(b'#'):
+        for nick_chan in channels:
+            if nick_chan.lower() == nick_recever.lower():
+                for conexao_recever in channels[nick_chan]:
+                    if conexao_recever != conexao:
+                        conexao_recever.enviar(b':' + nicknames[conexao] + b' PRIVMSG ' + nick_recever + b' :' + dados.split(b' :', 1)[1] + b'\r\n')
+                break
+    else:
+        for recever_connection, nick in nicknames.items():
+            if nick.lower() == nick_recever.lower(): # Verificando se o usuário existe
+                str = b':' + nick_sender + b' PRIVMSG ' + nick_recever + b' :' + dados.split(b' :', 1)[1] + b'\r\n'
+                recever_connection.enviar(str)
+                break
+    
+    return
+
+    
 def validar_nome(nome):
     return re.match(br'^[a-zA-Z][a-zA-Z0-9_-]*$', nome) is not None
 
 
 def sair(conexao):
     print(conexao, 'conexão fechada')
-    conexao.fechar()
 
+    canals_in = [canal for canal, connections in channels.items() if conexao in connections]
+
+    for chan in canals_in:
+        for connection in channels[chan][:]:
+              canals_in = [canal for canal, connections in channels.items() if conexao in connections]
+
+    for chan in canals_in:
+        for connection in channels[chan][:]:
+            if connection == conexao:
+                channels[chan].remove(conexao)
+                continue
+            connection.enviar(b':' + nicknames[conexao] + b' QUIT ' + b'\r\n')
+
+    del nicknames[conexao]
+    conexao.fechar()
+ 
 
 def dados_recebidos(conexao, dados):
     if dados == b'':
         return sair(conexao)
-    print(conexao, dados)
 
+    global residuos
+    residuos += dados
+    delimiter = b'\n'
+    if delimiter in residuos:
+        lines = [e+delimiter for e in residuos.split(delimiter)]
+        residuos = lines[-1].replace(b'\n', b'')
+        # processar cada linha 
+        for line in lines[:-1]:
+            validar_comando(conexao, line)
+
+    return
 
 def conexao_aceita(conexao):
+    nicknames[conexao] = b'*'
     print(conexao, 'nova conexão')
     conexao.registrar_recebedor(dados_recebidos)
-
 
 servidor = Servidor(6667)
 servidor.registrar_monitor_de_conexoes_aceitas(conexao_aceita)
